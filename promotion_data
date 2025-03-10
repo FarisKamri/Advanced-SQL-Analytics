@@ -1,0 +1,90 @@
+WITH 
+-- 1. Item Information
+item_info AS (
+    SELECT *
+    FROM <schema>.<item_table> 
+    WHERE anchor_date >= DATE('2020-01-01')
+),
+
+-- 2. General Rebate Data (e.g., G2N, voucher G2N, etc.)
+rebate_data AS (
+    SELECT  
+        rebate_column_1 AS rebate_1, 
+        rebate_column_2 AS rebate_2, 
+        rebate_column_3 AS rebate_3
+    FROM <schema>.<rebate_table>
+    WHERE rebate_date = (SELECT MAX(rebate_date) FROM <schema>.<rebate_table> WHERE rebate_date IS NOT NULL)
+),
+
+dates AS (
+    SELECT DISTINCT DATE(date) AS date_id
+    FROM <schema>.dates_table>
+    WHERE DATE(peak_date) BETWEEN DATE_TRUNC('MONTH', CURRENT_DATE) - INTERVAL '2' MONTH AND CURRENT_DATE - INTERVAL '1' DAY
+),
+
+-- 4. promotion id
+promo_base AS (
+    SELECT DISTINCT TRY_CAST(promotion_id AS BIGINT) AS promotion_id
+    FROM <schema>.<promo_ids_table>
+    WHERE promo_start_date IS NOT NULL
+      AND TRY_CAST(promo_start_date AS DATE) BETWEEN DATE_ADD('MONTH', -3, DATE_TRUNC('MONTH', CURRENT_DATE)) AND CURRENT_DATE - INTERVAL '1' DAY
+),
+
+-- 5. Rebate Data
+rebate_data AS (
+    WITH 
+    -- Rebate Promotion Data (Different sources)
+    rebate_vouchers AS (
+        SELECT DISTINCT voucher_id AS promotion_id, 'rebate01' AS promotion_name
+        FROM <schema>.<rebate_table>
+        UNION ALL
+        SELECT DISTINCT voucher_id AS promotion_id, 'rebate02' AS promotion_name
+        FROM <schema>.<manual_rebate_table>
+    )
+    SELECT * FROM rebate_vouchers
+),
+
+-- 6. Data for Orders and Items
+order_data AS (
+    WITH raw_data AS (
+        SELECT 
+            *  
+        FROM <schema>.<order_items_table>
+        WHERE DATE(from_unixtime(create_timestamp)) >= DATE_TRUNC('MONTH', CURRENT_DATE) - INTERVAL '3' MONTH
+          AND grass_date >= DATE_TRUNC('MONTH', CURRENT_DATE) - INTERVAL '3' MONTH
+    )
+    SELECT * 
+    FROM raw_data a
+    LEFT JOIN dates p ON DATE(from_unixtime(a.create_timestamp)) = p.date_id
+    WHERE p.date_id IS NOT NULL
+),
+
+-- 7. Aggregation for Order Items and Promotion Information
+order_aggregation AS (
+    WITH base_data AS (
+        SELECT 
+            shop_id,
+            order_id,
+            SUM(order_fraction) AS gross_order,
+            SUM(commission_base_amt) AS cba_amt
+        FROM order_data a
+        GROUP BY 1, 2
+    ),
+    aggregated_data AS (
+        SELECT 
+            shop_id,
+            order_id,
+            COALESCE(cba_amt, 0.0) / COALESCE(gross_order, 0.0) AS abs_tier
+        FROM base_data
+    )
+    SELECT  
+        shop_id,
+        order_id,
+        CASE  
+            WHEN abs_tier <= 15  THEN 'Tier 1: 0 - 15'
+            WHEN abs_tier <= 30  THEN 'Tier 2: 16 - 30'
+            WHEN abs_tier <= 50  THEN 'Tier 3: 31 - 50'
+            WHEN abs_tier <= 80  THEN 'Tier 4: 51 - 80'
+            WHEN abs_tier <= 100 THEN 'Tier 5: 80 - 100'
+
+-- to continue
